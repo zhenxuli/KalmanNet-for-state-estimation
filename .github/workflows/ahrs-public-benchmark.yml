@@ -1,0 +1,71 @@
+name: AHRS public-data benchmark
+
+on:
+  push:
+    branches:
+      - chatgpt/ahrs-public-benchmark-20260827
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  OMP_NUM_THREADS: "4"
+  MKL_NUM_THREADS: "4"
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Check out experiment branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ahrs.txt
+
+      - name: Install CPU PyTorch
+        run: python -m pip install --upgrade pip && python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install benchmark dependencies
+        run: python -m pip install -r requirements-ahrs.txt
+
+      - name: Run held-out BROAD screening benchmark
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p ahrs_public_benchmark/results
+          python -m ahrs_public_benchmark.run_benchmark \
+            --work-dir "$RUNNER_TEMP/ahrs-work" \
+            --output-dir ahrs_public_benchmark/results \
+            --target-hz 50 \
+            --window 64 \
+            --epochs 3 \
+            --max-train-windows 30000 \
+            --max-val-windows 10000 \
+            --seeds 0 2>&1 | tee ahrs_public_benchmark/benchmark.log
+
+      - name: Bundle exact source and workflow
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p ahrs_public_benchmark/results/reproducibility
+          cp requirements-ahrs.txt ahrs_public_benchmark/results/reproducibility/ || true
+          cp .github/workflows/ahrs-public-benchmark.yml ahrs_public_benchmark/results/reproducibility/ || true
+          cp ahrs_public_benchmark/*.py ahrs_public_benchmark/results/reproducibility/ || true
+          cp ahrs_public_benchmark/README.md ahrs_public_benchmark/results/reproducibility/ || true
+          cp ahrs_public_benchmark/benchmark.log ahrs_public_benchmark/results/ || true
+
+      - name: Upload results and checkpoints
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ahrs-public-benchmark-results
+          path: ahrs_public_benchmark/results
+          if-no-files-found: error
+          retention-days: 30
