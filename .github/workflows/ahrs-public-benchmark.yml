@@ -21,6 +21,13 @@ jobs:
     steps:
       - name: Check out experiment branch
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            ahrs_public_benchmark
+            requirements-ahrs.txt
+            .github/workflows/ahrs-public-benchmark.yml
+          sparse-checkout-cone-mode: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
