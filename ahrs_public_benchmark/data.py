@@ -84,16 +84,6 @@ def _read_h5_value(group: h5py.File, key: str) -> np.ndarray:
     return np.asarray(group[key])
 
 
-def _read_sampling_rate(f: h5py.File) -> float:
-    if "sampling_rate" in f.attrs:
-        return float(np.asarray(f.attrs["sampling_rate"]).reshape(-1)[0])
-    if "sampling_rate" in f:
-        return float(np.asarray(f["sampling_rate"]).reshape(-1)[0])
-    # BROAD nominal sampling rate is 2000/7 Hz. Keep this fallback for
-    # HDF5 exports that omit the attribute while preserving all signals.
-    return 2000.0 / 7.0
-
-
 def load_trial(path: Path, name: str, groups: Iterable[str]) -> TrialData:
     with h5py.File(path, "r") as f:
         gyr = _orient_rows(_read_h5_value(f, "imu_gyr"), 3).astype(np.float64)
@@ -101,7 +91,12 @@ def load_trial(path: Path, name: str, groups: Iterable[str]) -> TrialData:
         mag = _orient_rows(_read_h5_value(f, "imu_mag"), 3).astype(np.float64)
         quat = _orient_rows(_read_h5_value(f, "opt_quat"), 4).astype(np.float64)
         movement = np.squeeze(_read_h5_value(f, "movement")).astype(bool)
-        fs = _read_sampling_rate(f)
+        if "sampling_rate" in f.attrs:
+            fs = float(np.asarray(f.attrs["sampling_rate"]).reshape(-1)[0])
+        elif "sampling_rate" in f:
+            fs = float(np.asarray(f["sampling_rate"]).reshape(-1)[0])
+        else:
+            fs = 2000.0 / 7.0
     n = min(len(gyr), len(acc), len(mag), len(quat), len(movement))
     gyr, acc, mag, quat, movement = gyr[:n], acc[:n], mag[:n], quat[:n], movement[:n]
     quat = ensure_quat_continuity(quat)
@@ -119,6 +114,10 @@ def load_all_trials(root: Path) -> tuple[dict[str, TrialData], dict]:
 
 
 def _resultant_length(v: np.ndarray) -> float:
+    v = np.asarray(v, dtype=np.float64)
+    v = v[np.all(np.isfinite(v), axis=1)]
+    if len(v) == 0:
+        return float("nan")
     v = normalize_rows(v)
     return float(np.linalg.norm(np.mean(v, axis=0)))
 
@@ -130,7 +129,11 @@ def infer_body_to_global(trials: dict[str, TrialData]) -> bool:
             continue
         acc_norm = np.linalg.norm(trial.acc, axis=1)
         med = np.median(acc_norm)
-        mask = np.abs(acc_norm - med) < 0.04 * max(med, 1e-6)
+        mask = (
+            (np.abs(acc_norm - med) < 0.04 * max(med, 1e-6))
+            & np.all(np.isfinite(trial.acc), axis=1)
+            & np.all(np.isfinite(trial.quat_gt), axis=1)
+        )
         idx = np.flatnonzero(mask)[:: max(1, int(trial.fs // 20))][:3000]
         if len(idx) == 0:
             continue
@@ -164,8 +167,15 @@ def infer_integration_variant(trials: dict[str, TrialData], body_to_global: bool
     for trial in chosen_trials:
         step = max(1, int(trial.fs // 100))
         idx = np.arange(0, len(trial.gyr) - step, step)
-        idx = idx[:10000]
         q_seq = trial.quat_gt if body_to_global else quat_conj(trial.quat_gt)
+        valid = (
+            np.all(np.isfinite(q_seq[idx]), axis=1)
+            & np.all(np.isfinite(q_seq[idx + step]), axis=1)
+            & np.all(np.isfinite(trial.gyr[idx]), axis=1)
+        )
+        idx = idx[valid][:10000]
+        if len(idx) == 0:
+            continue
         q0 = q_seq[idx]
         q1 = q_seq[idx + step]
         omega_dt = trial.gyr[idx] * (step / trial.fs)
@@ -173,7 +183,12 @@ def infer_integration_variant(trials: dict[str, TrialData], body_to_global: bool
             q_pred = _integrate_one(q0, omega_dt, c)
             qe = quat_mul(q_pred, quat_conj(q1))
             errors[c].append(quat_angle(qe))
-    med = {c: float(np.median(np.concatenate(v))) for c, v in errors.items()}
+    med = {}
+    for c, values in errors.items():
+        if not values:
+            med[c] = float("inf")
+        else:
+            med[c] = float(np.median(np.concatenate(values)))
     print("One-step gyro convention median errors [deg]:", {k: np.rad2deg(v) for k, v in med.items()})
     return min(med, key=med.get)
 
@@ -191,6 +206,9 @@ def infer_global_references(trials: dict[str, TrialData], body_to_global: bool) 
         clean = (
             (np.abs(acc_norm - acc_med) < 0.03 * max(acc_med, 1e-6))
             & (np.abs(mag_norm - mag_med) < 0.08 * max(mag_med, 1e-6))
+            & np.all(np.isfinite(trial.acc), axis=1)
+            & np.all(np.isfinite(trial.mag), axis=1)
+            & np.all(np.isfinite(trial.quat_gt), axis=1)
         )
         idx = np.flatnonzero(clean)[:: max(1, int(trial.fs // 20))][:2000]
         if len(idx) == 0:
@@ -205,6 +223,8 @@ def infer_global_references(trials: dict[str, TrialData], body_to_global: bool) 
             R = quat_to_rotmat(q)
             g_samples.append(np.einsum("nji,nj->ni", R, a))
             m_samples.append(np.einsum("nji,nj->ni", R, m))
+    if not g_samples or not m_samples:
+        raise RuntimeError("No finite clean samples available to infer gravity/magnetic references")
     g = normalize_rows(np.mean(np.concatenate(g_samples, axis=0), axis=0))
     m = normalize_rows(np.mean(np.concatenate(m_samples, axis=0), axis=0))
     print("Inferred global gravity:", g, "magnetic reference:", m)
