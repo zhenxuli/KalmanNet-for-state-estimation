@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import math
 import random
 from dataclasses import dataclass
@@ -12,8 +11,6 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-
-from .geometry import normalize_rows
 
 
 @dataclass
@@ -32,7 +29,8 @@ class FeatureNormalizer:
     std: np.ndarray
 
     def transform(self, x: np.ndarray) -> np.ndarray:
-        return (x - self.mean) / self.std
+        y = (x - self.mean) / self.std
+        return np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
     def to_json(self) -> dict:
         return {"mean": self.mean.tolist(), "std": self.std.tolist()}
@@ -56,6 +54,9 @@ def build_features(gyr: np.ndarray, acc: np.ndarray, mag: np.ndarray | None, mod
 
 def fit_normalizer(sequences: list[PreparedSequence], max_samples: int = 300_000) -> FeatureNormalizer:
     x = np.concatenate([s.features for s in sequences], axis=0)
+    x = x[np.all(np.isfinite(x), axis=1)]
+    if len(x) == 0:
+        raise ValueError("No finite feature rows available for normalization")
     if len(x) > max_samples:
         rng = np.random.default_rng(1234)
         x = x[rng.choice(len(x), size=max_samples, replace=False)]
@@ -79,7 +80,11 @@ class ReferenceWindowDataset(Dataset):
         self.window = int(window)
         indices: list[tuple[int, int]] = []
         for si, seq in enumerate(sequences):
-            indices.extend((si, k) for k in range(len(seq.features)))
+            valid = np.all(np.isfinite(seq.gravity_target), axis=1) & np.isfinite(seq.raw_gravity_error)
+            if seq.magnetic_target is not None:
+                valid &= np.all(np.isfinite(seq.magnetic_target), axis=1)
+                valid &= np.isfinite(seq.raw_magnetic_error)
+            indices.extend((si, int(k)) for k in np.flatnonzero(valid))
         if max_windows is not None and len(indices) > max_windows:
             rng = np.random.default_rng(seed)
             chosen = rng.choice(len(indices), size=max_windows, replace=False)
@@ -274,6 +279,8 @@ def train_reference_model(
     model = ReferenceModel(in_channels, mode, has_mag).to(device)
     train_ds = ReferenceWindowDataset(train_sequences, normalizer, config.window, config.max_train_windows, seed)
     val_ds = ReferenceWindowDataset(val_sequences, normalizer, config.window, config.max_val_windows, seed + 1000)
+    if len(train_ds) == 0 or len(val_ds) == 0:
+        raise ValueError(f"No finite supervision windows for mode={mode}, has_mag={has_mag}")
     generator = torch.Generator().manual_seed(seed)
     train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, num_workers=0, generator=generator)
     val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, num_workers=0)
