@@ -47,11 +47,12 @@ def orientation_metrics(q_est: np.ndarray, q_gt: np.ndarray, movement: np.ndarra
     for threshold in (5, 10, 20):
         out[f"failure_rate_gt_{threshold}deg"] = float(np.mean(total_deg > threshold)) if len(total_deg) else np.nan
 
-    signed = np.unwrap(signed_heading_error(q_est, q_gt))
-    idx = np.flatnonzero(valid)
+    signed_raw = signed_heading_error(q_est, q_gt)
+    idx = np.flatnonzero(valid & np.isfinite(signed_raw))
     if len(idx) >= 10:
+        signed = np.unwrap(signed_raw[idx])
         t_min = idx / fs / 60.0
-        slope = np.polyfit(t_min, np.rad2deg(signed[idx]), 1)[0]
+        slope = np.polyfit(t_min, np.rad2deg(signed), 1)[0]
         out["heading_drift_deg_min"] = float(slope)
     else:
         out["heading_drift_deg_min"] = np.nan
@@ -92,13 +93,14 @@ def aggregate_groups(rows: list[dict], trial_groups: dict[str, tuple[str, ...]])
                 if not selected:
                     continue
                 metric = "inclination_rmse_deg" if mode == "6d" else "total_rmse_deg"
+                vals = np.asarray([r.get(metric, np.nan) for r in selected], float)
                 result.append(
                     {
                         "mode": mode,
                         "method": method,
                         "group": group,
                         "trial_count": len(selected),
-                        metric: float(np.mean([r[metric] for r in selected])),
+                        metric: float(np.nanmean(vals)),
                     }
                 )
     return result
