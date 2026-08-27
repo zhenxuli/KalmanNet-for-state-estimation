@@ -82,9 +82,15 @@ def quat_error(q_est: np.ndarray, q_gt: np.ndarray) -> np.ndarray:
 
 
 def align_quat_sequence_first(q_est: np.ndarray, q_gt: np.ndarray) -> np.ndarray:
+    """Left-align a quaternion sequence at the first mutually valid sample."""
     q_est = quat_normalize(q_est)
     q_gt = quat_normalize(q_gt)
-    q_align = quat_mul(q_gt[0], quat_conj(q_est[0]))
+    valid = np.all(np.isfinite(q_est), axis=-1) & np.all(np.isfinite(q_gt), axis=-1)
+    idx = np.flatnonzero(valid)
+    if len(idx) == 0:
+        raise ValueError("No mutually finite quaternion sample for initial alignment")
+    k0 = int(idx[0])
+    q_align = quat_mul(q_gt[k0], quat_conj(q_est[k0]))
     return quat_mul(np.broadcast_to(q_align, q_est.shape), q_est)
 
 
@@ -93,6 +99,7 @@ def calculate_total_error(q_est: np.ndarray, q_gt: np.ndarray) -> np.ndarray:
 
 
 def calculate_heading_inclination_error(q_est: np.ndarray, q_gt: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """BROAD-style heading and inclination errors."""
     qe = quat_error(q_est, q_gt)
     w = qe[:, 0]
     z = qe[:, 3]
@@ -130,8 +137,15 @@ def vector_angle(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 
 def ensure_quat_continuity(q: np.ndarray) -> np.ndarray:
-    q = quat_normalize(q).copy()
-    for k in range(1, len(q)):
-        if np.dot(q[k - 1], q[k]) < 0:
+    q = np.asarray(q, dtype=np.float64).copy()
+    finite = np.all(np.isfinite(q), axis=1)
+    if np.any(finite):
+        q[finite] = quat_normalize(q[finite])
+    last = None
+    for k in range(len(q)):
+        if not finite[k]:
+            continue
+        if last is not None and np.dot(q[last], q[k]) < 0:
             q[k] *= -1.0
+        last = k
     return q
