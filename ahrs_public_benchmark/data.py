@@ -84,6 +84,16 @@ def _read_h5_value(group: h5py.File, key: str) -> np.ndarray:
     return np.asarray(group[key])
 
 
+def _read_sampling_rate(f: h5py.File) -> float:
+    if "sampling_rate" in f.attrs:
+        return float(np.asarray(f.attrs["sampling_rate"]).reshape(-1)[0])
+    if "sampling_rate" in f:
+        return float(np.asarray(f["sampling_rate"]).reshape(-1)[0])
+    # BROAD nominal sampling rate is 2000/7 Hz. Keep this fallback for
+    # HDF5 exports that omit the attribute while preserving all signals.
+    return 2000.0 / 7.0
+
+
 def load_trial(path: Path, name: str, groups: Iterable[str]) -> TrialData:
     with h5py.File(path, "r") as f:
         gyr = _orient_rows(_read_h5_value(f, "imu_gyr"), 3).astype(np.float64)
@@ -91,8 +101,7 @@ def load_trial(path: Path, name: str, groups: Iterable[str]) -> TrialData:
         mag = _orient_rows(_read_h5_value(f, "imu_mag"), 3).astype(np.float64)
         quat = _orient_rows(_read_h5_value(f, "opt_quat"), 4).astype(np.float64)
         movement = np.squeeze(_read_h5_value(f, "movement")).astype(bool)
-        fs_raw = np.squeeze(_read_h5_value(f, "sampling_rate"))
-        fs = float(np.ravel(fs_raw)[0])
+        fs = _read_sampling_rate(f)
     n = min(len(gyr), len(acc), len(mag), len(quat), len(movement))
     gyr, acc, mag, quat, movement = gyr[:n], acc[:n], mag[:n], quat[:n], movement[:n]
     quat = ensure_quat_continuity(quat)
