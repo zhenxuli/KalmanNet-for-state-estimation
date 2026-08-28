@@ -1,0 +1,85 @@
+name: AHRS self-hosted Windows smoke
+
+on:
+  push:
+    branches:
+      - chatgpt/ahrs-public-benchmark-20260827
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  environment-smoke:
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Check out AHRS experiment files
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            ahrs_public_benchmark
+            requirements-ahrs.txt
+            .github/workflows/ahrs-self-hosted-smoke.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Probe Windows service environment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $outDir = Join-Path $env:GITHUB_WORKSPACE 'ahrs_public_benchmark\self_hosted_smoke'
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          $report = Join-Path $outDir 'environment.txt'
+
+          "RUNNER_NAME=$env:RUNNER_NAME" | Tee-Object -FilePath $report
+          "RUNNER_OS=$env:RUNNER_OS" | Tee-Object -FilePath $report -Append
+          "RUNNER_ARCH=$env:RUNNER_ARCH" | Tee-Object -FilePath $report -Append
+          "COMPUTERNAME=$env:COMPUTERNAME" | Tee-Object -FilePath $report -Append
+          "USERNAME=$env:USERNAME" | Tee-Object -FilePath $report -Append
+          "WORKSPACE=$env:GITHUB_WORKSPACE" | Tee-Object -FilePath $report -Append
+
+          $python = Get-Command python -ErrorAction SilentlyContinue
+          if (-not $python) { throw 'python is not visible to the GitHub Runner service PATH' }
+          "PYTHON_COMMAND=$($python.Source)" | Tee-Object -FilePath $report -Append
+          python --version 2>&1 | Tee-Object -FilePath $report -Append
+          python -c "import sys; print('PYTHON_EXE='+sys.executable); print('PYTHON_VERSION='+sys.version.replace(chr(10),' '))" 2>&1 | Tee-Object -FilePath $report -Append
+
+          python -c "import torch; print('TORCH_VERSION='+torch.__version__); print('TORCH_CUDA_VERSION='+str(torch.version.cuda)); print('CUDA_AVAILABLE='+str(torch.cuda.is_available())); print('CUDA_DEVICE_COUNT='+str(torch.cuda.device_count())); print('CUDA_DEVICE='+(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE')); assert torch.cuda.is_available(), 'PyTorch cannot access CUDA from the Runner service'" 2>&1 | Tee-Object -FilePath $report -Append
+
+          $nvsmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+          if ($nvsmi) {
+            "NVIDIA_SMI=$($nvsmi.Source)" | Tee-Object -FilePath $report -Append
+            nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1 | Tee-Object -FilePath $report -Append
+          } else {
+            "NVIDIA_SMI=NOT_ON_PATH" | Tee-Object -FilePath $report -Append
+          }
+
+          $matlab = Get-Command matlab -ErrorAction SilentlyContinue
+          $matlabPath = $null
+          if ($matlab) {
+            $matlabPath = $matlab.Source
+          } elseif (Test-Path 'C:\Program Files\MATLAB') {
+            $candidate = Get-ChildItem 'C:\Program Files\MATLAB' -Directory | Sort-Object Name -Descending | ForEach-Object { Join-Path $_.FullName 'bin\matlab.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($candidate) { $matlabPath = $candidate }
+          }
+          if (-not $matlabPath) { throw 'MATLAB is not visible to the Runner service and was not found under C:\Program Files\MATLAB' }
+          "MATLAB_EXE=$matlabPath" | Tee-Object -FilePath $report -Append
+          & $matlabPath -batch "fprintf('MATLAB_VERSION=%s\n',version); fprintf('MATLAB_ARCH=%s\n',computer);" 2>&1 | Tee-Object -FilePath $report -Append
+          if ($LASTEXITCODE -ne 0) { throw "MATLAB batch smoke failed with exit code $LASTEXITCODE" }
+
+      - name: Run CUDA compute smoke
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -c "import time, torch; assert torch.cuda.is_available(); torch.manual_seed(0); x=torch.randn((2048,2048),device='cuda'); torch.cuda.synchronize(); t=time.time(); y=x@x; torch.cuda.synchronize(); print('CUDA_MATMUL_OK=1'); print('CUDA_DEVICE='+torch.cuda.get_device_name(0)); print('ELAPSED_S=%.6f'%(time.time()-t)); print('CHECKSUM=%.6f'%y[0,0].item())"
+
+      - name: Upload environment report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ahrs-self-hosted-smoke-report
+          path: ahrs_public_benchmark/self_hosted_smoke
+          if-no-files-found: warn
+          retention-days: 14
