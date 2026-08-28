@@ -1,9 +1,6 @@
-name: AHRS public-data benchmark
+name: AHRS public-data benchmark (hosted fallback)
 
 on:
-  push:
-    branches:
-      - chatgpt/ahrs-public-benchmark-20260827
   workflow_dispatch:
 
 permissions:
